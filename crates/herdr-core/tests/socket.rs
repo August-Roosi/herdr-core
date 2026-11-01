@@ -234,3 +234,52 @@ fn unknown_machine() {
     let (_conn, reply) = open_on(&s, "nowhere", "127.0.0.1:1");
     assert_eq!(reply["error"]["data"]["kind"], "machine_unknown", "{reply}");
 }
+
+#[test]
+fn viewer_close_ends_remote_socket() {
+    let (_rohan, s) = with_rohan();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut peer = listener.accept().unwrap().0;
+        let mut buf = [0u8; 16];
+        while peer.read(&mut buf).unwrap_or(0) > 0 {}
+        done.send(()).unwrap();
+    });
+    let (mut conn, reply) = open_on(&s, "rohan", &format!("127.0.0.1:{port}"));
+    let channel = reply["result"]["channel"].as_u64().unwrap_or_else(|| panic!("{reply}")) as u32;
+    conn.send(channel, wire::CLOSE, b"");
+    ended.recv_timeout(WAIT).expect("the socket there closed");
+}
+
+#[test]
+fn bulk_through_relay() {
+    const TOTAL: usize = 4 << 20;
+    let (_rohan, s) = with_rohan();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut read = listener.accept().unwrap().0;
+        let mut write = read.try_clone().unwrap();
+        echo_split(&mut read, &mut write);
+    });
+    let (mut conn, reply) = open_on(&s, "rohan", &format!("127.0.0.1:{port}"));
+    let channel = reply["result"]["channel"].as_u64().unwrap_or_else(|| panic!("{reply}")) as u32;
+    let sent: Vec<u8> = (0..TOTAL).map(|i| (i % 251) as u8).collect();
+    for chunk in sent.chunks(16 << 10) {
+        conn.send(channel, wire::DATA, chunk);
+    }
+    let mut got = Vec::with_capacity(TOTAL);
+    let start = std::time::Instant::now();
+    while got.len() < TOTAL {
+        assert!(start.elapsed() < Duration::from_secs(60), "stuck after {} bytes", got.len());
+        if let Some((ch, wire::DATA, payload)) = conn.read(Duration::from_millis(200))
+            && ch == channel
+        {
+            got.extend_from_slice(&payload);
+            conn.send(channel, wire::CREDIT, &(payload.len() as u32).to_le_bytes());
+        }
+    }
+    assert!(got == sent, "the bytes came back changed");
+}

@@ -390,15 +390,19 @@ async fn hold(core: &Arc<Core>, m: &Machine, mut d: crate::machines::Dialed) {
                 mirror_events(core, m, &line, &payload);
                 let _ = line.frames.send(wire::encode(there, wire::CREDIT, &(payload.len() as u32).to_le_bytes()));
             }
+            // The streams guard is let go before anything else is locked: `conn_gone`
+            // takes the state lock, then this one.
             (there, wire::DATA) => {
-                if let Some((conn, here)) = lock(&line.streams).get(&there) {
+                let sink = lock(&line.streams).get(&there).cloned();
+                if let Some((conn, here)) = sink {
                     conn.with(|out| {
-                        out.data(*here, &payload);
+                        out.data(here, &payload);
                     });
                 }
             }
             (there, wire::CLOSE) => {
-                if let Some((conn, here)) = lock(&line.streams).remove(&there) {
+                let sink = lock(&line.streams).remove(&there);
+                if let Some((conn, here)) = sink {
                     core.lock().relayed.remove(&(conn_key(&conn), here));
                     conn.with(|out| out.finish(here, &payload));
                 }
