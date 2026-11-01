@@ -414,14 +414,16 @@ async fn handle(
     let params = crate::remote::from_peer(core, conn, request["params"].clone());
     let result = match crate::remote::route(core, method, &params) {
         _ if method == "$/orphaned" => crate::remote::orphaned(core, conn, &params).await,
-        Ok(Some((crate::remote::To::Machine(machine), params))) if method == "terminal.attach" => match conn {
-            Some(conn) => crate::remote::attach(core, conn, &machine, params).await,
-            None => Err(RpcError::new(
-                "needs_framed",
-                "attach needs a framed connection",
-                "send hello with framed: true first, or use `hc attach`",
-            )),
-        },
+        Ok(Some((crate::remote::To::Machine(machine), params))) if crate::remote::STREAMS.contains(&method) => {
+            match conn {
+                Some(conn) => crate::remote::open_stream(core, conn, &machine, method, params).await,
+                None => Err(RpcError::new(
+                    "needs_framed",
+                    format!("{method} needs a framed connection"),
+                    "send hello with framed: true first, or use `hc attach`",
+                )),
+            }
+        }
         Ok(Some((to, params))) => crate::remote::forward_to(core, &to, method, params).await,
         Ok(None) => api::dispatch(&call, method, params).await,
         Err(e) => Err(e),

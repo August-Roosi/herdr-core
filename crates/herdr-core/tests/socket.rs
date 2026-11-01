@@ -162,3 +162,75 @@ fn echo_split(read: &mut std::net::TcpStream, write: &mut std::net::TcpStream) {
         }
     }
 }
+
+/// A session with the machine `rohan` added (a second core on this host).
+fn with_rohan() -> (Session, Session) {
+    let rohan = Session::new();
+    let mut s = Session::new();
+    s.env.push(fake_ssh(&s, &[("rohan", &rohan)]));
+    s.env.push(("HC_RECONNECT_MS".into(), "200".into()));
+    s.json(&["machine", "add", "rohan"]);
+    (rohan, s)
+}
+
+fn echo_listener() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || echo(listener.accept().unwrap().0));
+    port
+}
+
+fn open_on(s: &Session, on: &str, address: &str) -> (Framed, serde_json::Value) {
+    let mut conn = Framed::open(s);
+    let reply = conn.call("socket.open", json!({"on": on, "address": address}));
+    (conn, reply)
+}
+
+#[test]
+fn echoes_through_a_machine() {
+    let (_rohan, s) = with_rohan();
+    let port = echo_listener();
+    let (mut conn, reply) = open_on(&s, "rohan", &format!("127.0.0.1:{port}"));
+    let channel = reply["result"]["channel"].as_u64().unwrap_or_else(|| panic!("{reply}")) as u32;
+    conn.send(channel, wire::DATA, b"ping");
+    assert_eq!(data(&mut conn, channel), b"ping");
+}
+
+#[test]
+fn remote_refusal_comes_back() {
+    let (_rohan, s) = with_rohan();
+    let (_conn, reply) = open_on(&s, "rohan", "10.0.0.1:80");
+    assert_eq!(reply["error"]["data"]["kind"], "not_allowed", "{reply}");
+}
+
+#[test]
+fn socket_channel_ends_when_line_drops() {
+    let (rohan, s) = with_rohan();
+    let port = echo_listener();
+    let (mut conn, reply) = open_on(&s, "rohan", &format!("127.0.0.1:{port}"));
+    let channel = reply["result"]["channel"].as_u64().unwrap_or_else(|| panic!("{reply}")) as u32;
+    conn.send(channel, wire::DATA, b"ping");
+    assert_eq!(data(&mut conn, channel), b"ping");
+
+    rohan.hc(&["server", "stop"]);
+    // The next frame on the channel is its CLOSE: no "reconnecting" notice, no bytes.
+    let start = std::time::Instant::now();
+    loop {
+        assert!(start.elapsed() < Duration::from_secs(5), "no CLOSE within 5 s");
+        let Some((ch, kind, payload)) = conn.read(Duration::from_millis(200)) else { continue };
+        if ch == channel {
+            assert_eq!(kind, wire::CLOSE, "{:?}", String::from_utf8_lossy(&payload));
+            break;
+        }
+    }
+    while let Some((ch, _, _)) = conn.read(Duration::from_millis(500)) {
+        assert_ne!(ch, channel, "a frame after CLOSE");
+    }
+}
+
+#[test]
+fn unknown_machine() {
+    let s = Session::new();
+    let (_conn, reply) = open_on(&s, "nowhere", "127.0.0.1:1");
+    assert_eq!(reply["error"]["data"]["kind"], "machine_unknown", "{reply}");
+}

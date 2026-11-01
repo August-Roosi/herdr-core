@@ -22,8 +22,11 @@ type Sink = (Arc<Conn>, u32);
 /// A call waiting for its reply, and where a stream it opens goes.
 type Waiting = (oneshot::Sender<Value>, Option<Sink>);
 
+mod streams;
 #[cfg(test)]
 mod tests;
+
+pub use streams::{STREAMS, conn_gone, open_stream, relay_in};
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -274,14 +277,16 @@ async fn supervise(core: Arc<Core>, id: String) {
     }
 }
 
-/// A viewer here on a terminal there. It outlives a dropped line: when the
-/// line is back, it is attached again on the same channel here.
+/// A viewer here on a stream there. A terminal viewer outlives a dropped
+/// line: when the line is back, it is attached again on the same channel here.
 #[derive(Clone)]
 pub struct Relayed {
     pub line: Arc<Line>,
     pub there: u32,
     pub conn: Arc<Conn>,
     pub machine: String,
+    /// What opened it: `terminal.attach` or `socket.open`.
+    pub method: &'static str,
     pub params: Value,
 }
 
@@ -291,7 +296,7 @@ async fn reattach(core: Arc<Core>, m: Machine, line: Arc<Line>) {
         .lock()
         .relayed
         .iter()
-        .filter(|(_, r)| r.machine == m.id && !Arc::ptr_eq(&r.line, &line))
+        .filter(|(_, r)| r.machine == m.id && r.method == "terminal.attach" && !Arc::ptr_eq(&r.line, &line))
         .map(|(k, r)| (*k, r.clone()))
         .collect();
     for ((key, here), r) in waiting {
@@ -413,14 +418,7 @@ async fn hold(core: &Arc<Core>, m: &Machine, mut d: crate::machines::Dialed) {
     }
     // Calls still waiting on it fail now ("lost the line"), not at their deadline.
     lock(&line.pending).clear();
-    // Viewers here hear that the line is gone and stay open; the programs keep
-    // running there, and the viewers get them back with the line.
-    let notice = format!("\r\n[line to {} lost; reconnecting...]\r\n", m.name);
-    for (_, (conn, here)) in lock(&line.streams).drain() {
-        conn.with(|out| {
-            out.data(here, notice.as_bytes());
-        });
-    }
+    streams::line_dropped(core, m, &line);
     // Killed, not waited for: a Mac core once never heard the old ssh had
     // died and stayed "connecting" for good. It is reaped in the background.
     let _ = d.child.start_kill();
@@ -741,70 +739,6 @@ pub fn conn_key(conn: &Arc<Conn>) -> usize {
     Arc::as_ptr(conn) as usize
 }
 
-/// Opens a viewer here on a terminal there: the stream channel there is
-/// relayed to a new channel on this connection, both ways.
-pub async fn attach(core: &Core, conn: &Arc<Conn>, m: &Machine, params: Value) -> Result<Value, RpcError> {
-    let line = line(core, m).await?;
-    let here = conn.new_channel();
-    conn.with(|out| out.open(here));
-    let deadline = deadline_for(core, "terminal.attach", &params);
-    match line.call_into(&m.name, "terminal.attach", params.clone(), Some((conn.clone(), here)), deadline).await {
-        Ok(mut r) => {
-            let there = r["channel"].as_u64().unwrap_or_default() as u32;
-            let viewer = Relayed { line, there, conn: conn.clone(), machine: m.id.clone(), params };
-            core.lock().relayed.insert((conn_key(conn), here), viewer);
-            r["channel"] = here.into();
-            Ok(localize(core, &m.name, &[], r))
-        }
-        Err(e) => {
-            conn.with(|out| out.close(here, b""));
-            Err(e)
-        }
-    }
-}
-
-/// A viewer's frame for a relayed stream goes there. False: not relayed.
-pub fn relay_in(core: &Core, conn: &Arc<Conn>, here: u32, kind: u8, payload: &[u8]) -> bool {
-    let r = {
-        let mut st = core.lock();
-        let Some(r) = st.relayed.get_mut(&(conn_key(conn), here)) else { return false };
-        // What a reattach after a dropped line brings back.
-        if kind == wire::RESIZE && payload.len() == 4 {
-            r.params["cols"] = u16::from_le_bytes([payload[0], payload[1]]).into();
-            r.params["rows"] = u16::from_le_bytes([payload[2], payload[3]]).into();
-        } else if kind == wire::FACTS
-            && let Ok(display) = serde_json::from_slice::<Value>(payload)
-        {
-            r.params["display"] = display;
-        }
-        r.clone()
-    };
-    // Read here: our stream to the viewer may send more, and so may the one there to us.
-    if kind == wire::CREDIT && payload.len() == 4 {
-        conn.with(|out| out.credit(here, u32::from_le_bytes(payload.try_into().unwrap()) as usize));
-    }
-    // While the line is down this goes nowhere: typing into a gap is lost, not queued.
-    let _ = r.line.frames.send(wire::encode(r.there, kind, payload));
-    true
-}
-
-/// A viewer's connection closed: its relayed streams there end.
-pub fn conn_gone(core: &Core, conn: &Arc<Conn>) {
-    let key = conn_key(conn);
-    let mut st = core.lock();
-    let gone: Vec<(u32, Arc<Line>, u32)> = st
-        .relayed
-        .iter()
-        .filter(|((k, _), _)| *k == key)
-        .map(|((_, here), r)| (*here, r.line.clone(), r.there))
-        .collect();
-    for (here, line, there) in gone {
-        st.relayed.remove(&(key, here));
-        lock(&line.streams).remove(&there);
-        let _ = line.frames.send(wire::encode(there, wire::CLOSE, b""));
-    }
-}
-
 /// Methods whose `terminal` names the terminal they act on.
 const ON_A_TERMINAL: &[&str] = &[
     "terminal.attach",
@@ -850,7 +784,14 @@ pub fn route(core: &Core, method: &str, params: &Value) -> Result<Option<(To, Va
     let mut params = params.clone();
     let to = if matches!(
         method,
-        "terminal.run" | "machine.exec" | "file.read" | "file.write" | "file.edit" | "doc.get" | "doc.set"
+        "terminal.run"
+            | "machine.exec"
+            | "file.read"
+            | "file.write"
+            | "file.edit"
+            | "doc.get"
+            | "doc.set"
+            | "socket.open"
     ) {
         let Some(on) = params["on"].as_str().map(String::from) else { return Ok(None) };
         params.as_object_mut().map(|p| p.remove("on"));

@@ -410,9 +410,6 @@ async fn socket_open(core: Ctx<'_>, p: SocketParams) -> Result<SocketResult, Rpc
             "send hello with framed: true first",
         ));
     };
-    if p.on.is_some() {
-        return Err(RpcError::new("unavailable", "sockets on another machine are not supported yet", ""));
-    }
     let channel = crate::socket::open(core.core, conn, &p.address).await?;
     Ok(SocketResult { channel })
 }

@@ -140,6 +140,8 @@ Use the returned address to wait/read it; don't launch a duplicate.
 the socket's bytes as DATA both ways, paced by CREDIT; CLOSE from either side
 ends both, and the socket closing sends CLOSE. Names such as `localhost` are
 never resolved (`not_allowed`); nothing listening is `refused`.
+With `on: "<machine>"` the socket is opened on that machine (its own
+loopback, decided there) and relayed; the channel ends if its line drops.
 
 ## Other machines and files
 
