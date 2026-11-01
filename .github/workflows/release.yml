@@ -33,15 +33,9 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        # A manual run may skip everything but Windows.
-        exclude: ${{ fromJSON(inputs.windows_only && '[{"name":"linux-x86_64"},{"name":"linux-aarch64"},{"name":"macos-aarch64"},{"name":"macos-x86_64"}]' || '[]') }}
-        include:
-          - { name: linux-x86_64, target: x86_64-unknown-linux-musl, runner: ubuntu-latest }
-          - { name: linux-aarch64, target: aarch64-unknown-linux-musl, runner: ubuntu-22.04-arm }
-          - { name: macos-aarch64, target: aarch64-apple-darwin, runner: macos-15 }
-          # Cross-build on Apple Silicon; verify the Intel binary under Rosetta.
-          - { name: macos-x86_64, target: x86_64-apple-darwin, runner: macos-15 }
-          - { name: windows-x86_64, target: x86_64-pc-windows-msvc, runner: windows-2025 }
+        # A manual run may build only Windows (inputs.windows_only); the list is JSON
+        # because a job-level `if` cannot read the matrix.
+        include: ${{ fromJSON(inputs.windows_only && '[{"name":"windows-x86_64","target":"x86_64-pc-windows-msvc","runner":"windows-2025"}]' || '[{"name":"linux-x86_64","target":"x86_64-unknown-linux-musl","runner":"ubuntu-latest"},{"name":"linux-aarch64","target":"aarch64-unknown-linux-musl","runner":"ubuntu-22.04-arm"},{"name":"macos-aarch64","target":"aarch64-apple-darwin","runner":"macos-15"},{"name":"macos-x86_64","target":"x86_64-apple-darwin","runner":"macos-15"},{"name":"windows-x86_64","target":"x86_64-pc-windows-msvc","runner":"windows-2025"}]') }}
     runs-on: ${{ matrix.runner }}
     # Only tag pushes can use the release environment's Apple certificate.
     environment: ${{ github.event_name == 'push' && github.ref_type == 'tag' && 'release' || 'build' }}
