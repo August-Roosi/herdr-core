@@ -10,6 +10,11 @@ on:
     tags: ["v*"]
   # Builds only; publishing needs a tag.
   workflow_dispatch:
+    inputs:
+      windows_only:
+        description: Build only the Windows target
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,6 +40,7 @@ jobs:
           # Cross-build on Apple Silicon; verify the Intel binary under Rosetta.
           - { name: macos-x86_64, target: x86_64-apple-darwin, runner: macos-15 }
           - { name: windows-x86_64, target: x86_64-pc-windows-msvc, runner: windows-2025 }
+    if: ${{ !inputs.windows_only || matrix.name == 'windows-x86_64' }}
     runs-on: ${{ matrix.runner }}
     # Only tag pushes can use the release environment's Apple certificate.
     environment: ${{ github.event_name == 'push' && github.ref_type == 'tag' && 'release' || 'build' }}
