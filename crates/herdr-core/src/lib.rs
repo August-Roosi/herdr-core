@@ -26,6 +26,7 @@ pub mod remote;
 pub mod rpc;
 pub mod runtime;
 pub mod server;
+mod socket;
 pub mod status;
 pub mod stitch;
 pub mod sweep;

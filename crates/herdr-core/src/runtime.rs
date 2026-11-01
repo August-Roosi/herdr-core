@@ -84,6 +84,8 @@ pub struct State {
     pub line_tasks: HashMap<String, tokio::task::AbortHandle>,
     /// Viewers here on terminals there, by (connection, channel here).
     pub relayed: HashMap<(usize, u32), crate::remote::Relayed>,
+    /// Local sockets opened over a connection, by (connection, channel).
+    pub sockets: HashMap<(usize, u32), crate::socket::Open>,
     /// Cores that dialed in, by id (kept), and the line to each while connected.
     pub peers: std::collections::BTreeMap<String, crate::remote::Peer>,
     pub peer_lines: HashMap<String, (usize, Arc<crate::remote::Line>)>,

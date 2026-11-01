@@ -912,6 +912,20 @@
         ],
         "type": "object"
       },
+      "SocketResult": {
+        "properties": {
+          "channel": {
+            "description": "Stream channel: DATA both ways is the socket's bytes; CREDIT paces what\narrives; CLOSE from either side ends both. The socket closing sends CLOSE.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "channel"
+        ],
+        "type": "object"
+      },
       "Status": {
         "description": "One 7501 record. Words are the program's own; nothing is translated.",
         "properties": {
@@ -2279,6 +2293,77 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/AttachResult"
+        }
+      }
+    },
+    {
+      "description": "Open a stream to a loopback TCP port (127.0.0.0/8, ::1) or a unix socket on this framed connection (see `hello` with `framed`). DATA is the socket's bytes both ways, paced by CREDIT; CLOSE from either side ends both.",
+      "errors": [
+        {
+          "code": -32000,
+          "data": {
+            "kind": "needs_framed"
+          },
+          "message": "needs_framed"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "not_allowed"
+          },
+          "message": "not_allowed"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "refused"
+          },
+          "message": "refused"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "machine_unknown"
+          },
+          "message": "machine_unknown"
+        },
+        {
+          "code": -32000,
+          "data": {
+            "kind": "unavailable"
+          },
+          "message": "unavailable"
+        }
+      ],
+      "name": "socket.open",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "description": "A loopback `host:port` (127.0.0.0/8 or `[::1]`) or a unix socket path. Names are never resolved.",
+          "name": "address",
+          "required": true,
+          "schema": {
+            "description": "A loopback `host:port` (127.0.0.0/8 or `[::1]`) or a unix socket path. Names are never resolved.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Open it on another machine (see `hc machine ls`).",
+          "name": "on",
+          "required": false,
+          "schema": {
+            "description": "Open it on another machine (see `hc machine ls`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SocketResult"
         }
       }
     },

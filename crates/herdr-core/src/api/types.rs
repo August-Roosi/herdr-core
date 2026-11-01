@@ -381,6 +381,23 @@ pub struct AttachParams {
     pub caller: Option<String>,
 }
 
+#[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
+pub struct SocketParams {
+    /// A loopback `host:port` (127.0.0.0/8 or `[::1]`) or a unix socket path. Names are never resolved.
+    pub address: String,
+    /// Open it on another machine (see `hc machine ls`).
+    #[arg(long, value_name = "MACHINE")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct SocketResult {
+    /// Stream channel: DATA both ways is the socket's bytes; CREDIT paces what
+    /// arrives; CLOSE from either side ends both. The socket closing sends CLOSE.
+    pub channel: u32,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct AttachResult {
     /// Stream channel: first paint, then live bytes. Send keys as DATA on it;

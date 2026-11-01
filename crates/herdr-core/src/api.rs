@@ -94,6 +94,9 @@ methods! { Ctx<'_>;
     "terminal.attach" => terminal_attach, AttachParams => AttachResult,
         "Open a raw stream to a live terminal on this framed connection (see `hello` with `framed`). Loss ends the stream even when kept; reattach after the restarted event.",
         errors ["not_found", "machine_unknown", "finished", "unavailable", "needs_framed"];
+    "socket.open" => socket_open, SocketParams => SocketResult,
+        "Open a stream to a loopback TCP port (127.0.0.0/8, ::1) or a unix socket on this framed connection (see `hello` with `framed`). DATA is the socket's bytes both ways, paced by CREDIT; CLOSE from either side ends both.",
+        errors ["needs_framed", "not_allowed", "refused", "machine_unknown", "unavailable"];
     "terminal.send" => terminal_send, SendParams => SendResult,
         "Paste text and press Enter, once nobody has typed for ~3 s; keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`.",
         errors ["not_found", "machine_unknown", "finished", "unavailable", "blocked", "status_mismatch", "invalid_params", "config"];
@@ -397,6 +400,21 @@ async fn terminal_read(core: Ctx<'_>, p: ReadParams) -> Result<ReadResult, RpcEr
     };
     core.flush_saved().await?;
     Ok(result)
+}
+
+async fn socket_open(core: Ctx<'_>, p: SocketParams) -> Result<SocketResult, RpcError> {
+    let Some(conn) = core.conn else {
+        return Err(RpcError::new(
+            "needs_framed",
+            "a socket needs a framed connection",
+            "send hello with framed: true first",
+        ));
+    };
+    if p.on.is_some() {
+        return Err(RpcError::new("unavailable", "sockets on another machine are not supported yet", ""));
+    }
+    let channel = crate::socket::open(core.core, conn, &p.address).await?;
+    Ok(SocketResult { channel })
 }
 
 async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult, RpcError> {

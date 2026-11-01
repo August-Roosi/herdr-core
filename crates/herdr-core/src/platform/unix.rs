@@ -75,6 +75,11 @@ impl AsyncListener {
     }
 }
 
+/// Connects to a unix socket at `path`, split for async use.
+pub async fn connect_unix(path: &Path) -> io::Result<(AsyncRead, AsyncWrite)> {
+    Ok(tokio::net::UnixStream::connect(path).await?.into_split())
+}
+
 pub fn remove_endpoint(path: &Path) {
     let _ = std::fs::remove_file(path);
 }

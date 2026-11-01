@@ -197,6 +197,7 @@ async fn connection(core: Arc<Core>, read: platform::AsyncRead, mut write: Write
     };
     core.detach(&conn, None);
     crate::remote::conn_gone(&core, &conn);
+    crate::socket::conn_gone(&core, &conn);
     crate::remote::peer_left(&core, &conn);
     writer.abort();
     result
@@ -340,7 +341,11 @@ async fn read_frames(core: &Arc<Core>, conn: &Arc<Conn>, read: &mut Reader) -> i
                 }
             }
             (0, _) => {}
-            (ch, wire::DATA) => core.viewer_input(conn, ch, &payload),
+            (ch, wire::DATA) => {
+                if !crate::socket::input(core, conn, ch, payload.clone()) {
+                    core.viewer_input(conn, ch, &payload)
+                }
+            }
             (ch, wire::CREDIT) if payload.len() == 4 => {
                 let n = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
                 conn.with(|out| out.credit(ch, n));
@@ -355,6 +360,7 @@ async fn read_frames(core: &Arc<Core>, conn: &Arc<Conn>, read: &mut Reader) -> i
                 }
             }
             (ch, wire::CLOSE) => {
+                crate::socket::close(core, conn, ch);
                 core.detach(conn, Some(ch));
                 conn.with(|out| out.close(ch, b""));
             }

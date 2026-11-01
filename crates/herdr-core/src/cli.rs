@@ -860,7 +860,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("machine rm", "machine.rm"),
 ];
 /// Client-only methods: handshake and opaque document storage.
-pub const API_ONLY: &[&str] = &["hello", "doc.get", "doc.set"];
+pub const API_ONLY: &[&str] = &["hello", "doc.get", "doc.set", "socket.open"];
 
 #[cfg(test)]
 mod tests {

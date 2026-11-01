@@ -295,6 +295,11 @@ impl Listener {
     }
 }
 
+/// Unix sockets are not available here.
+pub async fn connect_unix(_path: &Path) -> io::Result<(AsyncRead, AsyncWrite)> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "unix sockets are not available on Windows"))
+}
+
 pub type AsyncRead = tokio::io::ReadHalf<tokio::net::windows::named_pipe::NamedPipeServer>;
 pub type AsyncWrite = tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeServer>;
 

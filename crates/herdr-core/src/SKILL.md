@@ -135,6 +135,12 @@ Use the returned address to wait/read it; don't launch a duplicate.
 `hc put <t> <file>` sends a file beside a terminal and prints its destination.
 `hc label <t> key=value` adds labels.
 
+`socket.open` (framed API only, no CLI use) streams a loopback TCP port
+(127.0.0.0/8, `[::1]`) or a unix socket path: the result's `channel` carries
+the socket's bytes as DATA both ways, paced by CREDIT; CLOSE from either side
+ends both, and the socket closing sends CLOSE. Names such as `localhost` are
+never resolved (`not_allowed`); nothing listening is `refused`.
+
 ## Other machines and files
 
 Your harness's own file tools touch only the machine you run on. Use hc for
