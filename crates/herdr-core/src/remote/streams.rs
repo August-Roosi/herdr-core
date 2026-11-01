@@ -25,11 +25,20 @@ pub async fn open_stream(
     let here = conn.new_channel();
     conn.with(|out| out.open(here));
     let deadline = deadline_for(core, method, &params);
-    match line.call_into(&m.name, method, params.clone(), Some((conn.clone(), here)), deadline).await {
+    let sink = (conn.clone(), here, method == "socket.open");
+    match line.call_into(&m.name, method, params.clone(), Some(sink), deadline).await {
         Ok(mut r) => {
             let there = r["channel"].as_u64().unwrap_or_default() as u32;
-            let viewer = Relayed { line, there, conn: conn.clone(), machine: m.id.clone(), method, params };
-            core.lock().relayed.insert((conn_key(conn), here), viewer);
+            let mut st = core.lock();
+            // It went live with the reply: a CLOSE there or a dropped line since
+            // then found it not relayed yet and left its end to us.
+            if lock(&line.streams).contains_key(&there) {
+                let viewer = Relayed { line, there, conn: conn.clone(), machine: m.id.clone(), method, params };
+                st.relayed.insert((conn_key(conn), here), viewer);
+            } else {
+                conn.with(|out| out.finish(here, b""));
+            }
+            drop(st);
             r["channel"] = here.into();
             Ok(localize(core, &m.name, &[], r))
         }
@@ -46,12 +55,12 @@ pub async fn open_stream(
 pub(super) fn line_dropped(core: &Core, m: &Machine, line: &Line) {
     let notice = format!("\r\n[line to {} lost; reconnecting...]\r\n", m.name);
     let streams: Vec<_> = lock(&line.streams).drain().map(|(_, sink)| sink).collect();
-    for (conn, here) in streams {
-        let mut st = core.lock();
-        let key = (conn_key(&conn), here);
-        if st.relayed.get(&key).is_some_and(|r| r.method == "socket.open") {
-            st.relayed.remove(&key);
-            conn.with(|out| out.finish(here, b""));
+    for (conn, here, socket) in streams {
+        if socket {
+            // Not relayed yet: `open_stream` ends it once it is.
+            if core.lock().relayed.remove(&(conn_key(&conn), here)).is_some() {
+                conn.with(|out| out.finish(here, b""));
+            }
         } else {
             conn.with(|out| {
                 out.data(here, notice.as_bytes());

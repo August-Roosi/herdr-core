@@ -17,8 +17,9 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
-/// A viewer here that a stream there goes to: its connection and channel.
-type Sink = (Arc<Conn>, u32);
+/// A viewer here that a stream there goes to: its connection and channel, and
+/// whether it is a socket (which ends with the line, unlike a terminal viewer).
+type Sink = (Arc<Conn>, u32, bool);
 /// A call waiting for its reply, and where a stream it opens goes.
 type Waiting = (oneshot::Sender<Value>, Option<Sink>);
 
@@ -305,7 +306,8 @@ async fn reattach(core: Arc<Core>, m: Machine, line: Arc<Line>) {
         params["history"] = 0.into();
         params["resumed"] = true.into();
         let deadline = deadline_for(&core, "terminal.attach", &params);
-        let reply = line.call_into(&m.name, "terminal.attach", params, Some((r.conn.clone(), here)), deadline).await;
+        let reply =
+            line.call_into(&m.name, "terminal.attach", params, Some((r.conn.clone(), here, false)), deadline).await;
         let mut st = core.lock();
         // Gone meanwhile (the viewer detached): nothing to resume.
         if !st.relayed.contains_key(&(key, here)) {
@@ -394,7 +396,7 @@ async fn hold(core: &Arc<Core>, m: &Machine, mut d: crate::machines::Dialed) {
             // takes the state lock, then this one.
             (there, wire::DATA) => {
                 let sink = lock(&line.streams).get(&there).cloned();
-                if let Some((conn, here)) = sink {
+                if let Some((conn, here, _)) = sink {
                     conn.with(|out| {
                         out.data(here, &payload);
                     });
@@ -402,8 +404,10 @@ async fn hold(core: &Arc<Core>, m: &Machine, mut d: crate::machines::Dialed) {
             }
             (there, wire::CLOSE) => {
                 let sink = lock(&line.streams).remove(&there);
-                if let Some((conn, here)) = sink {
-                    core.lock().relayed.remove(&(conn_key(&conn), here));
+                // Not relayed yet: `open_stream` ends it once it is.
+                if let Some((conn, here, _)) = sink
+                    && core.lock().relayed.remove(&(conn_key(&conn), here)).is_some()
+                {
                     conn.with(|out| out.finish(here, &payload));
                 }
             }
