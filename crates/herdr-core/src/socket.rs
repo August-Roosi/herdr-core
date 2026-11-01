@@ -17,10 +17,14 @@ pub enum Target {
     Unix(PathBuf),
 }
 
-/// An open socket: bytes for it, and the task that pumps it.
+/// Client frames waiting for a socket that is slow to take them. Past this the
+/// channel is closed, so a stuck peer can't grow the core's memory.
+const MAX_QUEUED: usize = 1024;
+
+/// An open socket: bytes for it, and the two tasks that pump it.
 pub struct Open {
-    input: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-    task: tokio::task::AbortHandle,
+    input: tokio::sync::mpsc::Sender<Vec<u8>>,
+    tasks: [tokio::task::AbortHandle; 2],
 }
 
 /// Only loopback addresses and unix socket paths. Names are never resolved,
@@ -64,62 +68,81 @@ pub async fn open(core: &Arc<Core>, conn: &Arc<Conn>, address: &str) -> Result<u
     };
     let channel = conn.new_channel();
     let key = (conn_key(conn), channel);
-    let (input, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (input, rx) = tokio::sync::mpsc::channel(MAX_QUEUED);
     conn.with(|out| out.open(channel));
-    // The pump takes the state lock to leave it, so it can't run before we are in.
+    // The pumps take the state lock to leave it, so they can't end before we are in.
     let mut st = core.lock();
-    let task = tokio::spawn(pump(core.clone(), conn.clone(), channel, read, write, rx)).abort_handle();
-    st.sockets.insert(key, Open { input, task });
+    let tasks = [
+        tokio::spawn(read_pump(core.clone(), conn.clone(), channel, read)).abort_handle(),
+        tokio::spawn(write_pump(core.clone(), conn.clone(), channel, write, rx)).abort_handle(),
+    ];
+    st.sockets.insert(key, Open { input, tasks });
     Ok(channel)
 }
 
-/// Socket bytes to the channel (paused while a window's worth waits for credit),
-/// channel bytes to the socket. Ends on EOF, an error, or when aborted.
-async fn pump(
-    core: Arc<Core>,
-    conn: Arc<Conn>,
-    channel: u32,
-    mut read: Box<dyn AsyncRead + Send + Unpin>,
-    mut write: Box<dyn AsyncWrite + Send + Unpin>,
-    mut input: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-) {
+/// Socket bytes to the channel, paused while a window's worth waits for credit.
+/// It never waits on the write side, so a peer that writes while it reads can't deadlock us.
+async fn read_pump(core: Arc<Core>, conn: Arc<Conn>, channel: u32, mut read: Box<dyn AsyncRead + Send + Unpin>) {
     let mut buf = vec![0u8; 64 << 10];
     loop {
         // The client's credit has no wake-up of its own: while paused, look again shortly.
-        let paused = conn.outbox().queued(channel) >= wire::WINDOW;
-        tokio::select! {
-            bytes = input.recv() => match bytes {
-                Some(bytes) if write.write_all(&bytes).await.is_ok() => {}
-                _ => break,
-            },
-            n = read.read(&mut buf), if !paused => match n {
-                Ok(n @ 1..) => conn.with(|out| {
-                    out.data(channel, &buf[..n]);
-                }),
-                _ => break,
-            },
-            () = tokio::time::sleep(Duration::from_millis(5)), if paused => {}
+        if conn.outbox().queued(channel) >= wire::WINDOW {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            continue;
+        }
+        match read.read(&mut buf).await {
+            Ok(n @ 1..) => conn.with(|out| {
+                out.data(channel, &buf[..n]);
+            }),
+            _ => break,
         }
     }
-    // Its end follows what it already sent.
-    if core.lock().sockets.remove(&(conn_key(&conn), channel)).is_some() {
+    end(&core, &conn, channel);
+}
+
+/// Channel bytes to the socket.
+async fn write_pump(
+    core: Arc<Core>,
+    conn: Arc<Conn>,
+    channel: u32,
+    mut write: Box<dyn AsyncWrite + Send + Unpin>,
+    mut input: tokio::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    while let Some(bytes) = input.recv().await {
+        if write.write_all(&bytes).await.is_err() {
+            break;
+        }
+    }
+    end(&core, &conn, channel);
+}
+
+/// The socket ended on its own side: both pumps stop and the channel ends after what it already sent.
+fn end(core: &Core, conn: &Arc<Conn>, channel: u32) {
+    if let Some(s) = core.lock().sockets.remove(&(conn_key(conn), channel)) {
+        s.tasks.iter().for_each(|t| t.abort());
         conn.with(|out| out.finish(channel, b""));
     }
 }
 
 /// The client sent bytes on `channel`: for the socket, if it is one.
 pub fn input(core: &Core, conn: &Arc<Conn>, channel: u32, bytes: Vec<u8>) -> bool {
-    let st = core.lock();
-    st.sockets.get(&(conn_key(conn), channel)).is_some_and(|s| {
-        let _ = s.input.send(bytes);
-        true
-    })
+    let mut st = core.lock();
+    let key = (conn_key(conn), channel);
+    let Some(socket) = st.sockets.get(&key) else { return false };
+    if socket.input.try_send(bytes).is_err() {
+        // Too far behind (or already ending): the channel ends now.
+        if let Some(s) = st.sockets.remove(&key) {
+            s.tasks.iter().for_each(|t| t.abort());
+        }
+        conn.with(|out| out.close(channel, b""));
+    }
+    true
 }
 
 /// The client closed `channel`: a socket there ends.
 pub fn close(core: &Core, conn: &Arc<Conn>, channel: u32) {
     if let Some(s) = core.lock().sockets.remove(&(conn_key(conn), channel)) {
-        s.task.abort();
+        s.tasks.iter().for_each(|t| t.abort());
     }
 }
 
@@ -129,7 +152,7 @@ pub fn conn_gone(core: &Core, conn: &Arc<Conn>) {
     core.lock().sockets.retain(|(k, _), s| {
         let ours = *k == key;
         if ours {
-            s.task.abort();
+            s.tasks.iter().for_each(|t| t.abort());
         }
         !ours
     });

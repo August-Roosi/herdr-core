@@ -122,3 +122,43 @@ fn a_closing_peer_ends_the_channel() {
     let (ch, kind, payload) = conn.read(WAIT).expect("a frame");
     assert_eq!((ch, kind, payload.as_slice()), (channel, wire::CLOSE, &b""[..]));
 }
+
+#[test]
+fn bidirectional_bulk_does_not_hang() {
+    const TOTAL: usize = 8 << 20;
+    let s = Session::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // Echoes while reading: the peer blocks writing if we stop reading.
+    std::thread::spawn(move || {
+        let mut read = listener.accept().unwrap().0;
+        let mut write = read.try_clone().unwrap();
+        echo_split(&mut read, &mut write);
+    });
+    let (mut conn, channel) = open(&s, &format!("127.0.0.1:{port}"));
+    // Under the core's queue bound (1024 frames): 512 frames of 16 KiB.
+    for _ in 0..TOTAL / (16 << 10) {
+        conn.send(channel, wire::DATA, &[7u8; 16 << 10]);
+    }
+    let mut got = 0;
+    let start = std::time::Instant::now();
+    while got < TOTAL {
+        assert!(start.elapsed() < Duration::from_secs(30), "stuck after {got} bytes");
+        if let Some((ch, wire::DATA, payload)) = conn.read(Duration::from_millis(200))
+            && ch == channel
+        {
+            got += payload.len();
+            conn.send(channel, wire::CREDIT, &(payload.len() as u32).to_le_bytes());
+        }
+    }
+    assert_eq!(got, TOTAL);
+}
+
+fn echo_split(read: &mut std::net::TcpStream, write: &mut std::net::TcpStream) {
+    let mut buf = [0u8; 16 << 10];
+    while let Ok(n @ 1..) = read.read(&mut buf) {
+        if write.write_all(&buf[..n]).is_err() {
+            break;
+        }
+    }
+}
