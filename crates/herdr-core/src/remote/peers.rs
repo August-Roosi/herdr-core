@@ -34,7 +34,7 @@ fn save_peers(core: &Core, st: &State) {
 pub fn peer_joined(core: &Arc<Core>, conn: &Arc<Conn>, hello: &Value) {
     let (Some(id), Some(name)) = (hello["core"]["id"].as_str(), hello["core"]["name"].as_str()) else { return };
     let (frames, mut out) = mpsc::unbounded_channel::<Vec<u8>>();
-    let line = Line::new(frames, &Value::Null); // it only calls back here, never runs
+    let line = Line::new(frames, hello);
     let c = conn.clone();
     tokio::spawn(async move {
         while let Some(frame) = out.recv().await {
@@ -100,7 +100,8 @@ pub fn from_peer(core: &Core, conn: Option<&Arc<Conn>>, mut params: Value) -> Va
     let Some(conn) = conn else { return params };
     let st = core.lock();
     let key = conn_key(conn);
-    let Some(id) = st.peer_lines.iter().find(|(_, (k, _))| *k == key).map(|(id, _)| id) else { return params };
+    let Some((id, (_, line))) = st.peer_lines.iter().find(|(_, (k, _))| *k == key) else { return params };
+    super::negotiate_resize(line, &mut params);
     if let (Some(rest), Some(peer)) =
         (params["caller"].as_str().and_then(|c| c.strip_prefix(&format!("{id}/"))), st.peers.get(id))
     {

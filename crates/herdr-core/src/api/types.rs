@@ -107,6 +107,9 @@ pub struct HelloParams {
     pub core: Option<CoreInfo>,
     /// What that core calls this one (`rohan`), so news about `t7` reaches it as `rohan/t7`.
     pub calls_you: Option<String>,
+    /// Features supported by a core dialing in, including relaying size notifications.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -343,8 +346,8 @@ pub struct ReadResult {
     pub complete: bool,
     /// "screen", "history", or "stitched" (a full-screen app, read by scrolling it).
     pub how: String,
-    /// Why only the screen: "working" (a full-screen app isn't scrolled while
-    /// it works; read again once it stops).
+    /// Why only the screen: "working", "blocked" or "error" (a full-screen app
+    /// is not scrolled in these states).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
 }
@@ -358,6 +361,10 @@ pub struct AttachParams {
     #[arg(long)]
     #[serde(default)]
     pub observe: bool,
+    /// Observer understands core-to-viewer RESIZE before replacement paints.
+    #[arg(skip)]
+    #[serde(default)]
+    pub resize_notifications: bool,
     /// Scrollback lines to show first (main screen only).
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -405,6 +412,9 @@ pub struct AttachResult {
     /// RESIZE, FOCUS, FACTS, CREDIT and CLOSE frames control it.
     pub channel: u32,
     pub terminal: Public,
+    /// True only when the entire path sends RESIZE before replacement paints.
+    /// False or absent means the observer must track size changes separately.
+    pub resize_notifications: bool,
 }
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema, Default)]
@@ -710,7 +720,7 @@ pub struct FileResult {
 
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct MachineAddParams {
-    /// How ssh reaches it: `vps`, `can@10.0.0.7`, a Host from ~/.ssh/config.
+    /// How ssh reaches it: `vps`, `can@10.0.0.7`, `can@10.0.0.7:2222`, a Host from ~/.ssh/config.
     #[arg(required_unless_present = "via", conflicts_with = "via")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,

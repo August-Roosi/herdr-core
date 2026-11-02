@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const GENERATION: u32 = 1;
-pub const FEATURES: &[&str] = &["framed", "attach", "events", "status", "shell"];
+pub const FEATURES: &[&str] = &["framed", "attach", "events", "status", "shell", "resize_notifications"];
 pub const FINISHED_LINES: usize = 1000;
 /// A terminal's identity: fixed at start from whoever starts it.
 pub const IDENTITY_VARS: &[&str] = &["TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM"];
@@ -364,9 +364,14 @@ async fn terminal_read(core: Ctx<'_>, p: ReadParams) -> Result<ReadResult, RpcEr
             None => {
                 let st = core.lock();
                 let text = st.screens.get(&id).map(|s| crate::stitch::text(&s.screen_rows())).unwrap_or_default();
-                let working =
-                    st.reg.terminals.get(&id).and_then(|t| t.status.as_ref()).is_some_and(|s| s.state == "working");
-                ReadResult { text, complete: false, how: "screen".into(), why: working.then(|| "working".into()) }
+                let why = st
+                    .reg
+                    .terminals
+                    .get(&id)
+                    .and_then(|t| t.status.as_ref())
+                    .filter(|s| matches!(s.state.as_str(), "working" | "blocked" | "error"))
+                    .map(|s| s.state.clone());
+                ReadResult { text, complete: false, how: "screen".into(), why }
             }
         };
         core.flush_saved().await?;
@@ -435,13 +440,18 @@ async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult,
     }
     let req = crate::viewers::AttachRequest {
         observe: p.observe,
+        resize_notifications: p.resize_notifications,
         history: p.history,
         size: (p.cols, p.rows),
         display: p.display,
         resumed: p.resumed,
     };
     let channel = core.attach(conn, id, req)?;
-    Ok(AttachResult { channel, terminal: Public(record(core, id)?) })
+    Ok(AttachResult {
+        channel,
+        terminal: Public(record(core, id)?),
+        resize_notifications: p.observe && p.resize_notifications,
+    })
 }
 
 async fn terminal_send(core: Ctx<'_>, p: SendParams) -> Result<SendResult, RpcError> {
@@ -613,7 +623,7 @@ fn free_name(core: &Core, st: &crate::runtime::State, name: &str) -> Result<(), 
 
 async fn machine_add(core: Ctx<'_>, p: MachineAddParams) -> Result<crate::machines::Machine, RpcError> {
     let (target, via) = match (p.target, p.via) {
-        (Some(target), None) => (target, false),
+        (Some(target), None) => (crate::machines::ssh_target(target), false),
         (None, Some(command)) => (command, true),
         _ => return Err(RpcError::invalid_params("give either target or via")),
     };

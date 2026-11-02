@@ -137,8 +137,9 @@ pub fn command_names() -> Vec<String> {
 }
 
 pub fn main() -> i32 {
+    let daemon = crate::platform::daemon_startup();
     client::remember_exe();
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let args: Vec<_> = if daemon { vec!["serve".into()] } else { std::env::args_os().skip(1).collect() };
     match args.iter().map(|a| a.to_str()).collect::<Vec<_>>().as_slice() {
         [Some("--help" | "-h" | "help")] => {
             print!("{HELP}");
@@ -156,7 +157,7 @@ pub fn main() -> i32 {
     }
     // Before parsing we can only guess (for how to print a parse error).
     let piped = !std::io::stdout().is_terminal();
-    let cli = match Cli::try_parse() {
+    let cli = match Cli::try_parse_from(std::env::args_os().take(1).chain(args.iter().cloned())) {
         Ok(cli) => cli,
         Err(e) if !e.use_stderr() || !(piped || args.iter().any(|a| a == "--json")) => e.exit(),
         Err(e) => return fail(&RpcError::new("usage", usage_message(&e), "see `hc --help`"), true),
@@ -336,6 +337,7 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
     let pick_finished = |given: String| crate::cli::target(&paths, (!given.is_empty()).then_some(given), json, true);
     Ok(Some(match cmd {
         Cmd::Serve => {
+            crate::platform::prepare_core();
             crate::server::serve().map_err(|e| RpcError::internal(e.to_string()))?;
             return Ok(None);
         }
@@ -467,6 +469,9 @@ fn run(cmd: Option<Cmd>, json: bool, asked: bool) -> Result<Option<Out>, RpcErro
             let mut human = r["text"].as_str().unwrap_or_default().to_string();
             if r["why"] == "working" {
                 human.push_str("\n[hc] only its screen: it is working; read again once it stops for its history");
+            } else if let Some(state @ ("blocked" | "error")) = r["why"].as_str() {
+                human
+                    .push_str(&format!("\n[hc] only its screen: it is {state}; history is not scrolled in this state"));
             } else if r["complete"] == false {
                 human.push_str("\n[hc] incomplete: older output may be missing");
             }

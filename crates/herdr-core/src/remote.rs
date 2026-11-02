@@ -20,8 +20,8 @@ use tokio::sync::{mpsc, oneshot};
 /// A viewer here that a stream there goes to: its connection and channel, and
 /// whether it is a socket (which ends with the line, unlike a terminal viewer).
 type Sink = (Arc<Conn>, u32, bool);
-/// A call waiting for its reply, and where a stream it opens goes.
-type Waiting = (oneshot::Sender<Value>, Option<Sink>);
+/// A pending reply, its stream sink and whether resize support is required.
+type Waiting = (oneshot::Sender<Value>, Option<(Sink, bool)>);
 
 mod peers;
 mod streams;
@@ -74,10 +74,18 @@ impl Line {
     }
 
     /// A reply to one of our calls: to whoever waits for it.
-    fn take_reply(&self, reply: Value) {
+    fn take_reply(&self, mut reply: Value) {
         let Some((waiter, sink)) = reply["id"].as_u64().and_then(|id| lock(&self.pending).remove(&id)) else { return };
-        if let (Some(sink), Some(there)) = (sink, reply["result"]["channel"].as_u64()) {
-            lock(&self.streams).insert(there as u32, sink);
+        if let (Some((sink, require_resize)), Some(there)) = (sink, reply["result"]["channel"].as_u64()) {
+            if require_resize && reply["result"]["resize_notifications"] != true {
+                let _ = self.frames.send(wire::encode(there as u32, wire::CLOSE, b""));
+                reply = crate::rpc::response(
+                    reply["id"].clone(),
+                    Err(RpcError::new("unavailable", RESIZE_LOST, "attach again")),
+                );
+            } else {
+                lock(&self.streams).insert(there as u32, sink);
+            }
         }
         let _ = waiter.send(reply);
     }
@@ -104,7 +112,7 @@ impl Line {
         machine: &str,
         method: &str,
         params: Value,
-        sink: Option<Sink>,
+        sink: Option<(Sink, bool)>,
         deadline: Duration,
     ) -> Result<Value, RpcError> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
@@ -259,7 +267,7 @@ async fn supervise(core: Arc<Core>, id: String) {
             st.lines.insert(id.clone(), state);
             core.changed.notify_waiters();
         };
-        let hello = json!({"framed": true, "core": core.info, "calls_you": m.name});
+        let hello = json!({"framed": true, "core": core.info, "calls_you": m.name, "features": crate::api::FEATURES});
         match crate::machines::dial(&core.paths, m.reach(), m.session.as_deref(), hello).await {
             Ok(d) if d.hello["core"]["id"] != m.id.as_str() => {
                 down(&mut core.lock(), format!("a different core answers there ({})", d.hello["core"]["id"]));
@@ -303,6 +311,9 @@ pub struct Relayed {
     pub params: Value,
 }
 
+/// Why an opted-in stream was refused: a hop on the way lost resize support.
+const RESIZE_LOST: &str = "resize notifications lost";
+
 /// Viewers left waiting by a dropped line to `m` get their terminal back.
 async fn reattach(core: Arc<Core>, m: Machine, line: Arc<Line>) {
     let waiting: Vec<((usize, u32), Relayed)> = core
@@ -317,9 +328,11 @@ async fn reattach(core: Arc<Core>, m: Machine, line: Arc<Line>) {
         let mut params = r.params.clone();
         params["history"] = 0.into();
         params["resumed"] = true.into();
+        negotiate_resize(&line, &mut params);
         let deadline = deadline_for(&core, "terminal.attach", &params);
-        let reply =
-            line.call_into(&m.name, "terminal.attach", params, Some((r.conn.clone(), here, false)), deadline).await;
+        let sink = ((r.conn.clone(), here, false), r.params["resize_notifications"] == true);
+        let reply = line.call_into(&m.name, "terminal.attach", params, Some(sink), deadline).await;
+        let lost_resize = matches!(&reply, Err(e) if e.message == RESIZE_LOST);
         let mut st = core.lock();
         // Gone meanwhile (the viewer detached): nothing to resume.
         if !st.relayed.contains_key(&(key, here)) {
@@ -331,7 +344,13 @@ async fn reattach(core: Arc<Core>, m: Machine, line: Arc<Line>) {
             }
             None => {
                 st.relayed.remove(&(key, here));
-                r.conn.with(|out| out.finish(here, b""));
+                // A downgraded path must not deliver paints sized for the old
+                // contract; any other failure still hands over what arrived.
+                if lost_resize {
+                    r.conn.with(|out| out.close(here, b""));
+                } else {
+                    r.conn.with(|out| out.finish(here, b""));
+                }
             }
         }
     }
@@ -612,6 +631,12 @@ pub fn conn_key(conn: &Arc<Conn>) -> usize {
     Arc::as_ptr(conn) as usize
 }
 
+pub(super) fn negotiate_resize(line: &Line, params: &mut Value) {
+    if params["resize_notifications"] == true && !line.features.iter().any(|f| f == "resize_notifications") {
+        params["resize_notifications"] = false.into();
+    }
+}
+
 /// Methods whose `terminal` names the terminal they act on.
 const ON_A_TERMINAL: &[&str] = &[
     "terminal.attach",
@@ -748,7 +773,7 @@ async fn line(core: &Core, m: &Machine) -> Result<Arc<Line>, RpcError> {
 
 /// Sends a call to `m` and returns the reply with addresses as this core sees them.
 /// How long a call there may take: `machine_timeout`, plus the wait it asks
-/// for when it waits (`wait`, a waited `run` or `send`).
+/// for when it waits (`wait`, a waited `run` or `send`), and template readiness.
 fn deadline_for(core: &Core, method: &str, params: &Value) -> Duration {
     let config = crate::config::load(&core.paths.config).unwrap_or_default();
     if method == "machine.exec" {
@@ -762,7 +787,11 @@ fn deadline_for(core: &Core, method: &str, params: &Value) -> Duration {
         Some(secs) => secs,
         None => config.wait_timeout.unwrap_or(180.0),
     };
-    config.machine_timeout() + if waits { Duration::from_secs_f64(wait.clamp(0.0, 86_400.0)) } else { Duration::ZERO }
+    // Only the remote core knows whether argv names one of its templates.
+    let ready = if method == "terminal.run" { crate::templates::ready_timeout() } else { Duration::ZERO };
+    config.machine_timeout()
+        + ready
+        + if waits { Duration::from_secs_f64(wait.clamp(0.0, 86_400.0)) } else { Duration::ZERO }
 }
 
 fn waits(method: &str, params: &Value) -> bool {

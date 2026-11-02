@@ -1,6 +1,6 @@
 //! Streams there relayed to viewers here: terminal viewers and sockets.
 
-use super::{Line, Relayed, To, conn_key, deadline_for, line, localize, lock};
+use super::{Line, Relayed, To, conn_key, deadline_for, line, localize, lock, negotiate_resize};
 use crate::rpc::RpcError;
 use crate::runtime::Core;
 use crate::wire::{self, Conn};
@@ -18,20 +18,28 @@ pub async fn open_stream(
     conn: &Arc<Conn>,
     to: &To,
     method: &str,
-    params: Value,
+    mut params: Value,
 ) -> Result<Value, RpcError> {
     let method = STREAMS.into_iter().find(|s| *s == method).expect("a stream method");
     let (line, name, id) = match to {
         To::Machine(m) => (line(core, m).await?, &m.name, &m.id),
         To::Peer { id, name } => (super::peers::line(core, id, name)?, name, id),
     };
+    negotiate_resize(&line, &mut params);
     let here = conn.new_channel();
-    conn.with(|out| out.open(here));
+    conn.with(|out| out.open_paused(here));
     let deadline = deadline_for(core, method, &params);
-    let sink = (conn.clone(), here, method == "socket.open");
+    let sink = ((conn.clone(), here, method == "socket.open"), false);
     match line.call_into(name, method, params.clone(), Some(sink), deadline).await {
         Ok(mut r) => {
             let there = r["channel"].as_u64().unwrap_or_default() as u32;
+            if method == "terminal.attach" {
+                let enabled = params["observe"] == true
+                    && params["resize_notifications"] == true
+                    && r["resize_notifications"] == true;
+                r["resize_notifications"] = enabled.into();
+                params["resize_notifications"] = enabled.into();
+            }
             let mut st = core.lock();
             // It went live with the reply: a CLOSE there or a dropped line since
             // then found it not relayed yet and left its end to us.
@@ -78,11 +86,14 @@ pub(super) fn line_dropped(core: &Core, name: &str, line: &Line) {
 pub(super) fn stream_out(core: &Core, line: &Line, there: u32, kind: u8, payload: &[u8]) -> bool {
     let sink = match kind {
         wire::DATA => lock(&line.streams).get(&there).cloned(),
+        wire::RESIZE if payload.len() == 4 => lock(&line.streams).get(&there).cloned(),
         wire::CLOSE => lock(&line.streams).remove(&there),
         _ => None,
     };
     let Some((conn, here, _)) = sink else { return false };
-    if kind == wire::DATA {
+    if kind == wire::RESIZE {
+        conn.with(|out| out.ordered_resize(here, payload));
+    } else if kind == wire::DATA {
         conn.with(|out| {
             out.data(here, payload);
         });

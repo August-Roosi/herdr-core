@@ -61,6 +61,11 @@ hc read --lines 100 review          # screen plus history; waits return status o
 hc interrupt review                # stop its current turn, not the process
 ```
 
+`read --lines 0` reads only the visible screen. History reads may scroll a
+full-screen app, then restore its view. While its status is `working`,
+`blocked` or `error`, history reads return only the screen immediately,
+marked incomplete with `why` set to that status; no scroll input is sent.
+
 Keep doing useful work while children work. When you need their results:
 
 ```sh
@@ -209,6 +214,10 @@ paths start at your current folder. Prefer explicit paths for remote work.
   is already current. JSON reports `restarted: true`; terminals keep running.
   Managed installs must be updated with their package manager instead, and
   one in a folder you can't write (Unix) the way it was installed.
+- On macOS, desktop starts use a one-shot launchd job so quitting the launching
+  app doesn't end terminals. SSH starts stay direct. If launchd fails, startup
+  falls back to a direct child and logs the reason in `core.log`; that core may
+  end with its launching app.
 - Never `hc server stop` or restart the user's core unless asked. It affects
   every terminal. Tests need their own `HC_SESSION` and scratch XDG paths.
 - Errors are `{error: {kind, message, hint}}` on stderr. Exit codes include
