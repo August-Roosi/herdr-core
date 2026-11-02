@@ -11,7 +11,8 @@
 #
 # `-File install.ps1 <release zip> [session]` installs from a zip already
 # here, checked by whoever put it here, and removes both files after
-# (`hc machine add` from another machine does that).
+# (`hc machine add` from another machine does that). That build replaces
+# the installed hc even when the installed one is newer.
 
 # Its own scope: under `irm | iex` it would otherwise set the caller's variables.
 & {
@@ -71,8 +72,10 @@ try {
     New-Item -ItemType Directory -Force $dir | Out-Null
     $exe = Join-Path $dir "herdr-core.exe"
     if (Test-Path $exe) {
-        # Swapped the planned way, so its terminals keep running.
-        & $exe update --from $new | Out-Null
+        # Swapped the planned way, so its terminals keep running. A zip given
+        # here is installed whatever is there, even a newer release.
+        $force = if ($zip) { @("--force") } else { @() }
+        & $exe update --from $new @force | Out-Null
         if ($LASTEXITCODE) { Fail "updating $exe failed (see above)" }
         Write-Host "hc updated to $version."
     } else {

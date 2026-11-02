@@ -28,6 +28,14 @@ pub(super) fn older(a: &str, b: &str) -> bool {
     matches!((parts(a), parts(b)), (Some(a), Some(b)) if a < b)
 }
 
+/// Whether `update --from` swaps in `now` over this `was`: never backwards
+/// unless forced. Equal versions swap: another build of the same release (a
+/// fork's) replaces it. `install.ps1` forces a zip it was given, so a fork
+/// build replaces an official release of the same or a newer version.
+pub(super) fn may_swap(now: &str, was: &str, force: bool) -> bool {
+    force || !older(now, was)
+}
+
 /// The installed binary can be current while a core started before it was
 /// replaced is still running. Do not start a core just to check its version.
 pub(super) fn up_to_date(paths: &Paths, release: &str, human: String) -> Result<Out, RpcError> {
@@ -70,7 +78,7 @@ pub(super) fn update(paths: &Paths, from: &std::path::Path, force: bool) -> Resu
     }
     let was = format!("hc {}", env!("CARGO_PKG_VERSION"));
     let now = version_of(from).ok_or_else(|| refused(format!("{} is not a working hc", from.display()), ""))?;
-    if older(&now, &was) && !force {
+    if !may_swap(&now, &was, force) {
         return Err(refused(format!("{now} is older than this {was}"), "--force to go back anyway"));
     }
     // Staged beside it, checked, then swapped in: never a half-written hc.
@@ -94,4 +102,14 @@ pub(super) fn update(paths: &Paths, from: &std::path::Path, force: bool) -> Resu
         json: json!({"path": shown, "was": was, "now": now, "restarted": restarted, "pid": status["pid"]}),
         human,
     })
+}
+
+#[cfg(test)]
+#[test]
+fn a_given_build_swaps_in_unless_it_is_older_and_not_forced() {
+    assert!(may_swap("hc 0.1.17", "hc 0.1.17", false), "same version, another build");
+    assert!(may_swap("hc 0.1.18", "hc 0.1.17", false));
+    assert!(!may_swap("hc 0.1.16", "hc 0.1.17", false));
+    assert!(may_swap("hc 0.1.16", "hc 0.1.17", true), "a forced install replaces a newer one");
+    assert!(may_swap("hc 0.1.17", "hc 0.2.0", true));
 }
