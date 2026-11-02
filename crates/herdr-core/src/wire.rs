@@ -126,6 +126,12 @@ impl Conn {
         self.outbox.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// One whose own channels are numbered past `first`: the side that dialed
+    /// a line keeps its streams apart from those of the side it dialed.
+    pub fn numbered_from(first: u32) -> Conn {
+        Conn { next_channel: first.into(), ..Conn::default() }
+    }
+
     pub fn new_channel(&self) -> u32 {
         self.next_channel.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
     }

@@ -490,10 +490,18 @@
               "$ref": "#/components/schemas/MachineView"
             },
             "type": "array"
+          },
+          "peers": {
+            "description": "Cores that dialed in (added this machine). `socket.open` with `on` reaches\nonly what a peer shares (`share:<name>`).",
+            "items": {
+              "$ref": "#/components/schemas/PeerView"
+            },
+            "type": "array"
           }
         },
         "required": [
-          "machines"
+          "machines",
+          "peers"
         ],
         "type": "object"
       },
@@ -563,6 +571,28 @@
           "id",
           "host",
           "version",
+          "state"
+        ],
+        "type": "object"
+      },
+      "PeerView": {
+        "description": "A core that dialed in, as `machine ls` shows it.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "description": "What it is called here.",
+            "type": "string"
+          },
+          "state": {
+            "description": "connected or disconnected.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "id",
           "state"
         ],
         "type": "object"
@@ -2297,7 +2327,7 @@
       }
     },
     {
-      "description": "Open a stream to a loopback TCP port (127.0.0.0/8, ::1) or a unix socket on this framed connection (see `hello` with `framed`). DATA is the socket's bytes both ways, paced by CREDIT; CLOSE from either side ends both.",
+      "description": "Open a stream to a loopback TCP port (127.0.0.0/8, ::1) or a unix socket on this framed connection (see `hello` with `framed`), or one a terminal shares (`share:<name>`). DATA is the socket's bytes both ways, paced by CREDIT; CLOSE from either side ends both.",
       "errors": [
         {
           "code": -32000,
@@ -2339,20 +2369,20 @@
       "paramStructure": "by-name",
       "params": [
         {
-          "description": "A loopback `host:port` (127.0.0.0/8 or `[::1]`) or a unix socket path. Names are never resolved.",
+          "description": "A loopback `host:port` (127.0.0.0/8 or `[::1]`) or a unix socket path. Names are never resolved.\n`share:<name>` is what a live terminal there shares with its label `share.<name>=<address>`.",
           "name": "address",
           "required": true,
           "schema": {
-            "description": "A loopback `host:port` (127.0.0.0/8 or `[::1]`) or a unix socket path. Names are never resolved.",
+            "description": "A loopback `host:port` (127.0.0.0/8 or `[::1]`) or a unix socket path. Names are never resolved.\n`share:<name>` is what a live terminal there shares with its label `share.<name>=<address>`.",
             "type": "string"
           }
         },
         {
-          "description": "Open it on another machine (see `hc machine ls`).",
+          "description": "Open it on another machine or peer (see `hc machine ls`). A peer opens only `share:` addresses.",
           "name": "on",
           "required": false,
           "schema": {
-            "description": "Open it on another machine (see `hc machine ls`).",
+            "description": "Open it on another machine or peer (see `hc machine ls`). A peer opens only `share:` addresses.",
             "type": [
               "string",
               "null"

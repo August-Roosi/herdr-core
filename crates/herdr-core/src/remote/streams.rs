@@ -1,7 +1,6 @@
 //! Streams there relayed to viewers here: terminal viewers and sockets.
 
-use super::{Line, Relayed, conn_key, deadline_for, line, localize, lock};
-use crate::machines::Machine;
+use super::{Line, Relayed, To, conn_key, deadline_for, line, localize, lock};
 use crate::rpc::RpcError;
 use crate::runtime::Core;
 use crate::wire::{self, Conn};
@@ -11,36 +10,40 @@ use std::sync::Arc;
 /// The calls whose reply opens a stream there.
 pub const STREAMS: [&str; 2] = ["terminal.attach", "socket.open"];
 
-/// Opens a stream there (`terminal.attach` or `socket.open`): its channel there
-/// is relayed to a new channel on this connection, both ways.
+/// Opens a stream there (`terminal.attach` or `socket.open`; a peer only
+/// serves the latter): its channel there is relayed to a new channel on this
+/// connection, both ways.
 pub async fn open_stream(
     core: &Core,
     conn: &Arc<Conn>,
-    m: &Machine,
+    to: &To,
     method: &str,
     params: Value,
 ) -> Result<Value, RpcError> {
     let method = STREAMS.into_iter().find(|s| *s == method).expect("a stream method");
-    let line = line(core, m).await?;
+    let (line, name, id) = match to {
+        To::Machine(m) => (line(core, m).await?, &m.name, &m.id),
+        To::Peer { id, name } => (super::peers::line(core, id, name)?, name, id),
+    };
     let here = conn.new_channel();
     conn.with(|out| out.open(here));
     let deadline = deadline_for(core, method, &params);
     let sink = (conn.clone(), here, method == "socket.open");
-    match line.call_into(&m.name, method, params.clone(), Some(sink), deadline).await {
+    match line.call_into(name, method, params.clone(), Some(sink), deadline).await {
         Ok(mut r) => {
             let there = r["channel"].as_u64().unwrap_or_default() as u32;
             let mut st = core.lock();
             // It went live with the reply: a CLOSE there or a dropped line since
             // then found it not relayed yet and left its end to us.
             if lock(&line.streams).contains_key(&there) {
-                let viewer = Relayed { line, there, conn: conn.clone(), machine: m.id.clone(), method, params };
+                let viewer = Relayed { line, there, conn: conn.clone(), machine: id.clone(), method, params };
                 st.relayed.insert((conn_key(conn), here), viewer);
             } else {
                 conn.with(|out| out.finish(here, b""));
             }
             drop(st);
             r["channel"] = here.into();
-            Ok(localize(core, &m.name, &[], r))
+            Ok(localize(core, name, &[], r))
         }
         Err(e) => {
             conn.with(|out| out.close(here, b""));
@@ -52,8 +55,8 @@ pub async fn open_stream(
 /// A line dropped. Terminal viewers hear so and stay open: the programs keep
 /// running there, and the viewers get them back with the line. A socket
 /// there is gone with it, so its channel here ends.
-pub(super) fn line_dropped(core: &Core, m: &Machine, line: &Line) {
-    let notice = format!("\r\n[line to {} lost; reconnecting...]\r\n", m.name);
+pub(super) fn line_dropped(core: &Core, name: &str, line: &Line) {
+    let notice = format!("\r\n[line to {name} lost; reconnecting...]\r\n");
     let streams: Vec<_> = lock(&line.streams).drain().map(|(_, sink)| sink).collect();
     for (conn, here, socket) in streams {
         if socket {
@@ -66,6 +69,43 @@ pub(super) fn line_dropped(core: &Core, m: &Machine, line: &Line) {
                 out.data(here, notice.as_bytes());
             });
         }
+    }
+}
+
+/// A frame from there on its stream `there`, for the viewer here it goes to.
+/// False: no such stream. The streams guard is let go before anything else is
+/// locked: `conn_gone` takes the state lock, then this one.
+pub(super) fn stream_out(core: &Core, line: &Line, there: u32, kind: u8, payload: &[u8]) -> bool {
+    let sink = match kind {
+        wire::DATA => lock(&line.streams).get(&there).cloned(),
+        wire::CLOSE => lock(&line.streams).remove(&there),
+        _ => None,
+    };
+    let Some((conn, here, _)) = sink else { return false };
+    if kind == wire::DATA {
+        conn.with(|out| {
+            out.data(here, payload);
+        });
+    // Not relayed yet: `open_stream` ends it once it is.
+    } else if core.lock().relayed.remove(&(conn_key(&conn), here)).is_some() {
+        conn.with(|out| out.finish(here, payload));
+    }
+    true
+}
+
+/// A frame from there for a socket served here (`socket::serve`), as a
+/// framed connection's own client frames are taken.
+pub(super) fn served_in(core: &Core, line: &Line, there: u32, kind: u8, payload: &[u8]) {
+    let back = &line.back;
+    match kind {
+        wire::DATA => {
+            crate::socket::input(core, back, there, payload.to_vec());
+        }
+        wire::CREDIT if payload.len() == 4 => {
+            back.with(|out| out.credit(there, u32::from_le_bytes(payload.try_into().unwrap()) as usize))
+        }
+        wire::CLOSE if crate::socket::close(core, back, there) => back.with(|out| out.close(there, b"")),
+        _ => {}
     }
 }
 

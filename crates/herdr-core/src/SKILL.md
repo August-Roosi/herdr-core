@@ -140,8 +140,13 @@ Use the returned address to wait/read it; don't launch a duplicate.
 the socket's bytes as DATA both ways, paced by CREDIT; CLOSE from either side
 ends both, and the socket closing sends CLOSE. Names such as `localhost` are
 never resolved (`not_allowed`); nothing listening is `refused`.
+A live terminal shares a socket with the label `share.<name>=<address>`;
+`address: "share:<name>"` opens it (`not_shared` when no live terminal does).
 With `on: "<machine>"` the socket is opened on that machine (its own
 loopback, decided there) and relayed; the channel ends if its line drops.
+`on` may also name a peer, a core that added this machine (`machine.list`
+`peers`); a peer opens only what it shares (`share:<name>`), anything else
+is `not_allowed`.
 
 ## Other machines and files
 

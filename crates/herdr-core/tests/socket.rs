@@ -265,14 +265,19 @@ fn bulk_through_relay() {
         echo_split(&mut read, &mut write);
     });
     let (mut conn, reply) = open_on(&s, "rohan", &format!("127.0.0.1:{port}"));
+    bulk(&mut conn, &reply, TOTAL);
+}
+
+/// Sends `total` bytes on the reply's channel and checks they echo back unchanged, crediting as they come.
+fn bulk(conn: &mut Framed, reply: &serde_json::Value, total: usize) {
     let channel = reply["result"]["channel"].as_u64().unwrap_or_else(|| panic!("{reply}")) as u32;
-    let sent: Vec<u8> = (0..TOTAL).map(|i| (i % 251) as u8).collect();
+    let sent: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
     for chunk in sent.chunks(16 << 10) {
         conn.send(channel, wire::DATA, chunk);
     }
-    let mut got = Vec::with_capacity(TOTAL);
+    let mut got = Vec::with_capacity(total);
     let start = std::time::Instant::now();
-    while got.len() < TOTAL {
+    while got.len() < total {
         assert!(start.elapsed() < Duration::from_secs(60), "stuck after {} bytes", got.len());
         if let Some((ch, wire::DATA, payload)) = conn.read(Duration::from_millis(200))
             && ch == channel
@@ -282,4 +287,108 @@ fn bulk_through_relay() {
         }
     }
     assert!(got == sent, "the bytes came back changed");
+}
+
+/// A live terminal here sharing `127.0.0.1:<port>` as `share.<name>`; returns its address.
+fn share(s: &Session, name: &str, port: u16) -> String {
+    run(s, &["--label", &format!("share.{name}=127.0.0.1:{port}"), "sleep", "100"])
+}
+
+fn id_of(s: &Session) -> String {
+    s.json(&["server", "status"])["core"]["id"].as_str().unwrap().to_string()
+}
+
+fn pings(conn: &mut Framed, reply: &serde_json::Value) {
+    let channel = reply["result"]["channel"].as_u64().unwrap_or_else(|| panic!("{reply}")) as u32;
+    conn.send(channel, wire::DATA, b"ping");
+    assert_eq!(data(conn, channel), b"ping");
+}
+
+#[test]
+fn share_resolves_locally() {
+    let s = Session::new();
+    share(&s, "echo", echo_listener());
+    let mut conn = Framed::open(&s);
+    let reply = conn.call("socket.open", json!({"address": "share:echo"}));
+    pings(&mut conn, &reply);
+}
+
+#[test]
+fn unknown_share_not_shared() {
+    let s = Session::new();
+    let mut conn = Framed::open(&s);
+    let reply = conn.call("socket.open", json!({"address": "share:nothing"}));
+    assert_eq!(reply["error"]["data"]["kind"], "not_shared", "{reply}");
+}
+
+#[test]
+fn share_gone_when_terminal_ends() {
+    let s = Session::new();
+    let t = share(&s, "echo", echo_listener());
+    s.json(&["kill", &t]);
+    let mut conn = Framed::open(&s);
+    let reply = conn.call("socket.open", json!({"address": "share:echo"}));
+    assert_eq!(reply["error"]["data"]["kind"], "not_shared", "{reply}");
+}
+
+#[test]
+fn peer_reaches_shared_socket() {
+    let (rohan, s) = with_rohan();
+    share(&s, "echo", echo_listener());
+    let (mut conn, reply) = open_on(&rohan, &id_of(&s), "share:echo");
+    pings(&mut conn, &reply);
+}
+
+#[test]
+fn bulk_from_a_peer() {
+    let (rohan, s) = with_rohan();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut read = listener.accept().unwrap().0;
+        let mut write = read.try_clone().unwrap();
+        echo_split(&mut read, &mut write);
+    });
+    share(&s, "bulk", port);
+    let (mut conn, reply) = open_on(&rohan, &id_of(&s), "share:bulk");
+    bulk(&mut conn, &reply, 4 << 20);
+}
+
+#[test]
+fn peer_raw_address_not_allowed() {
+    let (rohan, s) = with_rohan();
+    let port = echo_listener();
+    let (_conn, reply) = open_on(&rohan, &id_of(&s), &format!("127.0.0.1:{port}"));
+    assert_eq!(reply["error"]["data"]["kind"], "not_allowed", "{reply}");
+}
+
+#[test]
+fn machine_list_includes_peers() {
+    let (rohan, s) = with_rohan();
+    // The line comes up after `machine add` returns.
+    wait_until("rohan sees its peer", || rohan.json(&["machine", "ls"])["peers"][0]["state"] == "connected");
+    let list = rohan.json(&["machine", "ls"]);
+    assert_eq!(list["machines"], json!([]), "{list}");
+    let peer = &list["peers"][0];
+    assert_eq!((&peer["id"], &peer["state"]), (&json!(id_of(&s)), &json!("connected")), "{list}");
+    assert!(peer["name"].is_string(), "{list}");
+}
+
+#[test]
+fn peer_socket_closes_when_line_drops() {
+    let (rohan, s) = with_rohan();
+    share(&s, "echo", echo_listener());
+    let (mut conn, reply) = open_on(&rohan, &id_of(&s), "share:echo");
+    pings(&mut conn, &reply);
+    let channel = reply["result"]["channel"].as_u64().unwrap() as u32;
+    s.hc(&["server", "stop"]);
+    let start = std::time::Instant::now();
+    loop {
+        assert!(start.elapsed() < Duration::from_secs(5), "no CLOSE within 5 s");
+        let Some((ch, kind, _)) = conn.read(Duration::from_millis(200)) else { continue };
+        if ch == channel {
+            assert_eq!(kind, wire::CLOSE);
+            break;
+        }
+    }
 }

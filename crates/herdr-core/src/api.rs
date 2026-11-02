@@ -95,7 +95,7 @@ methods! { Ctx<'_>;
         "Open a raw stream to a live terminal on this framed connection (see `hello` with `framed`). Loss ends the stream even when kept; reattach after the restarted event.",
         errors ["not_found", "machine_unknown", "finished", "unavailable", "needs_framed"];
     "socket.open" => socket_open, SocketParams => SocketResult,
-        "Open a stream to a loopback TCP port (127.0.0.0/8, ::1) or a unix socket on this framed connection (see `hello` with `framed`). DATA is the socket's bytes both ways, paced by CREDIT; CLOSE from either side ends both.",
+        "Open a stream to a loopback TCP port (127.0.0.0/8, ::1) or a unix socket on this framed connection (see `hello` with `framed`), or one a terminal shares (`share:<name>`). DATA is the socket's bytes both ways, paced by CREDIT; CLOSE from either side ends both.",
         errors ["needs_framed", "not_allowed", "refused", "machine_unknown", "unavailable"];
     "terminal.send" => terminal_send, SendParams => SendResult,
         "Paste text and press Enter, once nobody has typed for ~3 s; keys a person presses meanwhile are held, then delivered. Refuses a blocked program unless `force`.",
@@ -674,7 +674,8 @@ async fn machine_add(core: Ctx<'_>, p: MachineAddParams) -> Result<crate::machin
 
 async fn machine_list(core: Ctx<'_>, _: Empty) -> Result<MachineListResult, RpcError> {
     let st = core.lock();
-    Ok(MachineListResult { machines: st.machines.iter().map(|m| crate::remote::view(&st, m)).collect() })
+    let machines = st.machines.iter().map(|m| crate::remote::view(&st, m)).collect();
+    Ok(MachineListResult { machines, peers: crate::remote::peer_views(&st) })
 }
 
 async fn machine_connect(core: Ctx<'_>, p: MachineParams) -> Result<crate::remote::MachineView, RpcError> {

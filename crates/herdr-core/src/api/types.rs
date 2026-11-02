@@ -384,8 +384,9 @@ pub struct AttachParams {
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct SocketParams {
     /// A loopback `host:port` (127.0.0.0/8 or `[::1]`) or a unix socket path. Names are never resolved.
+    /// `share:<name>` is what a live terminal there shares with its label `share.<name>=<address>`.
     pub address: String,
-    /// Open it on another machine (see `hc machine ls`).
+    /// Open it on another machine or peer (see `hc machine ls`). A peer opens only `share:` addresses.
     #[arg(long, value_name = "MACHINE")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on: Option<String>,
@@ -757,6 +758,9 @@ pub struct MachineRenameParams {
 #[derive(Serialize, JsonSchema)]
 pub struct MachineListResult {
     pub machines: Vec<crate::remote::MachineView>,
+    /// Cores that dialed in (added this machine). `socket.open` with `on` reaches
+    /// only what a peer shares (`share:<name>`).
+    pub peers: Vec<crate::remote::PeerView>,
 }
 
 #[derive(Serialize, JsonSchema)]

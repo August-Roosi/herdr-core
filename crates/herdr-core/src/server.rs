@@ -304,7 +304,10 @@ async fn read_frames(core: &Arc<Core>, conn: &Arc<Conn>, read: &mut Reader) -> i
     // closes, or when it gives up on one (`$/cancelRequest`).
     let mut execs = Execs::default();
     while let Some((channel, kind, payload)) = wire::read_frame(read).await? {
-        if channel != 0 && crate::remote::relay_in(core, conn, channel, kind, &payload) {
+        if channel != 0
+            && (crate::remote::relay_in(core, conn, channel, kind, &payload)
+                || crate::remote::stream_in(core, conn, channel, kind, &payload))
+        {
             continue;
         }
         match (channel, kind) {
@@ -414,16 +417,14 @@ async fn handle(
     let params = crate::remote::from_peer(core, conn, request["params"].clone());
     let result = match crate::remote::route(core, method, &params) {
         _ if method == "$/orphaned" => crate::remote::orphaned(core, conn, &params).await,
-        Ok(Some((crate::remote::To::Machine(machine), params))) if crate::remote::STREAMS.contains(&method) => {
-            match conn {
-                Some(conn) => crate::remote::open_stream(core, conn, &machine, method, params).await,
-                None => Err(RpcError::new(
-                    "needs_framed",
-                    format!("{method} needs a framed connection"),
-                    "send hello with framed: true first, or use `hc attach`",
-                )),
-            }
-        }
+        Ok(Some((to, params))) if crate::remote::STREAMS.contains(&method) => match conn {
+            Some(conn) => crate::remote::open_stream(core, conn, &to, method, params).await,
+            None => Err(RpcError::new(
+                "needs_framed",
+                format!("{method} needs a framed connection"),
+                "send hello with framed: true first, or use `hc attach`",
+            )),
+        },
         Ok(Some((to, params))) => crate::remote::forward_to(core, &to, method, params).await,
         Ok(None) => api::dispatch(&call, method, params).await,
         Err(e) => Err(e),

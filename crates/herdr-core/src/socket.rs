@@ -2,8 +2,9 @@
 
 use crate::remote::conn_key;
 use crate::rpc::RpcError;
-use crate::runtime::Core;
+use crate::runtime::{Core, State};
 use crate::wire::{self, Conn};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,9 +44,15 @@ pub fn allowed(address: &str) -> Result<Target, RpcError> {
     }
 }
 
-async fn connect(
-    target: Target,
-) -> std::io::Result<(Box<dyn AsyncRead + Send + Unpin>, Box<dyn AsyncWrite + Send + Unpin>)> {
+type Halves = (Box<dyn AsyncRead + Send + Unpin>, Box<dyn AsyncWrite + Send + Unpin>);
+
+/// What a live terminal here shares as `share.<name>` (the newest, if several do).
+pub fn resolve_share(st: &State, name: &str) -> Option<String> {
+    let label = format!("share.{name}");
+    st.reg.terminals.values().rev().filter(|t| t.is_live()).find_map(|t| t.labels.get(&label).cloned())
+}
+
+async fn connect(target: Target) -> std::io::Result<Halves> {
     Ok(match target {
         Target::Tcp(addr) => {
             let (r, w) = tokio::net::TcpStream::connect(addr).await?.into_split();
@@ -58,18 +65,60 @@ async fn connect(
     })
 }
 
-pub async fn open(core: &Arc<Core>, conn: &Arc<Conn>, address: &str) -> Result<u32, RpcError> {
-    let target = allowed(address)?;
-    let refused = |why: String| RpcError::new("refused", format!("{address}: {why}"), "is something listening there?");
-    let (read, write) = match tokio::time::timeout(Duration::from_secs(5), connect(target)).await {
-        Ok(Ok(halves)) => halves,
-        Ok(Err(e)) => return Err(refused(e.to_string())),
-        Err(_) => return Err(refused("timed out".into())),
+/// Connects to `address`, or to what a terminal here shares as `share:<name>`.
+async fn connect_to(core: &Core, address: &str) -> Result<Halves, RpcError> {
+    let address = match address.strip_prefix("share:") {
+        Some(name) => resolve_share(&core.lock(), name).ok_or_else(|| {
+            RpcError::new("not_shared", format!("no live terminal here shares {name:?}"), "is it running?")
+        })?,
+        None => address.to_string(),
     };
+    let target = allowed(&address)?;
+    let refused = |why: String| RpcError::new("refused", format!("{address}: {why}"), "is something listening there?");
+    match tokio::time::timeout(Duration::from_secs(5), connect(target)).await {
+        Ok(Ok(halves)) => Ok(halves),
+        Ok(Err(e)) => Err(refused(e.to_string())),
+        Err(_) => Err(refused("timed out".into())),
+    }
+}
+
+pub async fn open(core: &Arc<Core>, conn: &Arc<Conn>, address: &str) -> Result<u32, RpcError> {
+    let halves = connect_to(core, address).await?;
     let channel = conn.new_channel();
+    conn.with(|out| out.open(channel));
+    start(core, conn, channel, halves);
+    Ok(channel)
+}
+
+/// `socket.open` from a machine this core dialed: it reaches only what a
+/// terminal here shares. The reply goes on `back` ahead of the socket's bytes.
+pub async fn serve(core: &Arc<Core>, back: &Arc<Conn>, id: Value, address: &str) {
+    let opened = match address.starts_with("share:") {
+        true => connect_to(core, address).await,
+        false => Err(RpcError::new(
+            "not_allowed",
+            format!("{address} is not shared here"),
+            "a machine this core dialed opens only share:<name>",
+        )),
+    };
+    let reply = |result| wire::encode(0, wire::DATA, crate::rpc::response(id, result).to_string().as_bytes());
+    match opened {
+        Ok(halves) => {
+            let channel = back.new_channel();
+            back.with(|out| {
+                out.control(reply(Ok(json!({"channel": channel}))));
+                out.open(channel);
+            });
+            start(core, back, channel, halves);
+        }
+        Err(e) => back.with(|out| out.control(reply(Err(e)))),
+    }
+}
+
+/// Pumps an open socket on `channel`, already open on `conn`.
+fn start(core: &Arc<Core>, conn: &Arc<Conn>, channel: u32, (read, write): Halves) {
     let key = (conn_key(conn), channel);
     let (input, rx) = tokio::sync::mpsc::channel(MAX_QUEUED);
-    conn.with(|out| out.open(channel));
     // The pumps take the state lock to leave it, so they can't end before we are in.
     let mut st = core.lock();
     let tasks = [
@@ -77,7 +126,6 @@ pub async fn open(core: &Arc<Core>, conn: &Arc<Conn>, address: &str) -> Result<u
         tokio::spawn(write_pump(core.clone(), conn.clone(), channel, write, rx)).abort_handle(),
     ];
     st.sockets.insert(key, Open { input, tasks });
-    Ok(channel)
 }
 
 /// Socket bytes to the channel, paused while a window's worth waits for credit.
@@ -139,11 +187,10 @@ pub fn input(core: &Core, conn: &Arc<Conn>, channel: u32, bytes: Vec<u8>) -> boo
     true
 }
 
-/// The client closed `channel`: a socket there ends.
-pub fn close(core: &Core, conn: &Arc<Conn>, channel: u32) {
-    if let Some(s) = core.lock().sockets.remove(&(conn_key(conn), channel)) {
-        s.tasks.iter().for_each(|t| t.abort());
-    }
+/// The client closed `channel`: a socket there ends. False: not a socket.
+pub fn close(core: &Core, conn: &Arc<Conn>, channel: u32) -> bool {
+    let gone = core.lock().sockets.remove(&(conn_key(conn), channel));
+    gone.map(|s| s.tasks.iter().for_each(|t| t.abort())).is_some()
 }
 
 /// A connection ended: its sockets end.

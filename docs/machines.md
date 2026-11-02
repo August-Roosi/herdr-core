@@ -74,6 +74,11 @@ A returned address such as `box/t3` points to a terminal on box.
 Use the full address when sending, reading, waiting, or attaching from here.
 Ctrl+\ leaves an attached terminal without ending its program.
 
+A machine you add can't reach your loopback ports. It can open only a socket
+that a live terminal on your machine shares with the label
+`share.<name>=127.0.0.1:<port>` (framed `socket.open` with `address: "share:<name>"`).
+On that machine, `hc machine ls --json` lists your core under `peers`.
+
 Remote paths start at the remote user's home unless you set a working directory.
 Local paths start at your current folder. Prefer explicit remote paths.
 
