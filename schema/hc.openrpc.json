@@ -2369,11 +2369,11 @@
       "paramStructure": "by-name",
       "params": [
         {
-          "description": "A loopback `host:port` (127.0.0.0/8 or `[::1]`) or a unix socket path. Names are never resolved.\n`share:<name>` is what a live terminal there shares with its label `share.<name>=<address>`.",
+          "description": "A loopback `host:port` (127.0.0.0/8 or `[::1]`) or a unix socket path. Names are never resolved.\n`share:<name>` is the loopback `host:port` a live terminal there shares with its label `share.<name>`.",
           "name": "address",
           "required": true,
           "schema": {
-            "description": "A loopback `host:port` (127.0.0.0/8 or `[::1]`) or a unix socket path. Names are never resolved.\n`share:<name>` is what a live terminal there shares with its label `share.<name>=<address>`.",
+            "description": "A loopback `host:port` (127.0.0.0/8 or `[::1]`) or a unix socket path. Names are never resolved.\n`share:<name>` is the loopback `host:port` a live terminal there shares with its label `share.<name>`.",
             "type": "string"
           }
         },

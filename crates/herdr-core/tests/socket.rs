@@ -340,6 +340,23 @@ fn peer_reaches_shared_socket() {
 }
 
 #[test]
+fn unix_share_not_allowed() {
+    let s = Session::new();
+    run(&s, &["--label", "share.u=/tmp/x.sock", "sleep", "100"]);
+    let mut conn = Framed::open(&s);
+    let reply = conn.call("socket.open", json!({"address": "share:u"}));
+    assert_eq!(reply["error"]["data"]["kind"], "not_allowed", "{reply}");
+}
+
+#[test]
+fn peer_unix_share_not_allowed() {
+    let (rohan, s) = with_rohan();
+    run(&s, &["--label", &format!("share.u={}", s.socket().display()), "sleep", "100"]);
+    let (_conn, reply) = open_on(&rohan, &id_of(&s), "share:u");
+    assert_eq!(reply["error"]["data"]["kind"], "not_allowed", "{reply}");
+}
+
+#[test]
 fn bulk_from_a_peer() {
     let (rohan, s) = with_rohan();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

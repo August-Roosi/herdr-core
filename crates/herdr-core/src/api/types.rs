@@ -384,7 +384,7 @@ pub struct AttachParams {
 #[derive(clap::Args, Serialize, Deserialize, JsonSchema)]
 pub struct SocketParams {
     /// A loopback `host:port` (127.0.0.0/8 or `[::1]`) or a unix socket path. Names are never resolved.
-    /// `share:<name>` is what a live terminal there shares with its label `share.<name>=<address>`.
+    /// `share:<name>` is the loopback `host:port` a live terminal there shares with its label `share.<name>`.
     pub address: String,
     /// Open it on another machine or peer (see `hc machine ls`). A peer opens only `share:` addresses.
     #[arg(long, value_name = "MACHINE")]

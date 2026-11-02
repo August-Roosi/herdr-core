@@ -67,13 +67,25 @@ async fn connect(target: Target) -> std::io::Result<Halves> {
 
 /// Connects to `address`, or to what a terminal here shares as `share:<name>`.
 async fn connect_to(core: &Core, address: &str) -> Result<Halves, RpcError> {
-    let address = match address.strip_prefix("share:") {
-        Some(name) => resolve_share(&core.lock(), name).ok_or_else(|| {
-            RpcError::new("not_shared", format!("no live terminal here shares {name:?}"), "is it running?")
-        })?,
-        None => address.to_string(),
+    let (address, target) = match address.strip_prefix("share:") {
+        Some(name) => {
+            let address = resolve_share(&core.lock(), name).ok_or_else(|| {
+                RpcError::new("not_shared", format!("no live terminal here shares {name:?}"), "is it running?")
+            })?;
+            // Never a unix socket: one could be this core's own control socket.
+            match allowed(&address) {
+                Ok(target @ Target::Tcp(_)) => (address, target),
+                _ => {
+                    return Err(RpcError::new(
+                        "not_allowed",
+                        format!("{name} shares {address}"),
+                        "share values are loopback host:port",
+                    ));
+                }
+            }
+        }
+        None => (address.to_string(), allowed(address)?),
     };
-    let target = allowed(&address)?;
     let refused = |why: String| RpcError::new("refused", format!("{address}: {why}"), "is something listening there?");
     match tokio::time::timeout(Duration::from_secs(5), connect(target)).await {
         Ok(Ok(halves)) => Ok(halves),

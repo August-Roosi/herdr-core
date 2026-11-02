@@ -71,6 +71,10 @@ pub(super) fn line(core: &Core, id: &str, name: &str) -> Result<Arc<Line>, RpcEr
 
 /// A peer's frame on a stream it serves us (a socket it shares). False: not one.
 pub fn stream_in(core: &Core, conn: &Arc<Conn>, channel: u32, kind: u8, payload: &[u8]) -> bool {
+    // Any other frame passes without the state lock.
+    if channel <= super::SERVED {
+        return false;
+    }
     let key = conn_key(conn);
     let line = core.lock().peer_lines.values().find(|(k, _)| *k == key).map(|(_, l)| l.clone());
     line.is_some_and(|line| super::streams::stream_out(core, &line, channel, kind, payload))

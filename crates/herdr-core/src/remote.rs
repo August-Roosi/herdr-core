@@ -38,6 +38,9 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Channels past this are numbered by the side that dialed (`Line.back`).
+const SERVED: u32 = 1 << 31;
+
 /// One open line: calls go out on channel 0, replies come back by id;
 /// attach streams there are relayed to viewers here.
 pub struct Line {
@@ -66,7 +69,7 @@ impl Line {
             streams: Mutex::default(),
             next: AtomicU64::new(2),
             mirror: Mutex::default(),
-            back: Arc::new(Conn::numbered_from(1 << 31)),
+            back: Arc::new(Conn::numbered_from(SERVED)),
         })
     }
 
