@@ -74,8 +74,11 @@ try {
     if (Test-Path $exe) {
         # Swapped the planned way, so its terminals keep running. A zip given
         # here is installed whatever is there, even a newer release.
-        $force = if ($zip) { @("--force") } else { @() }
-        & $exe update --from $new @force | Out-Null
+        # The installed hc does the swap, and an older or official one may not
+        # know --force: try the plain swap first, then force it (no splatting:
+        # Windows PowerShell 5.1 mangles "--force" passed that way).
+        & $exe update --from $new | Out-Null
+        if ($LASTEXITCODE -and $zip) { & $exe update --from $new --force | Out-Null }
         if ($LASTEXITCODE) { Fail "updating $exe failed (see above)" }
         Write-Host "hc updated to $version."
     } else {
